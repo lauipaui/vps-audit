@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VPS_AUDIT_VERSION="0.3.0-alpine"
+VPS_AUDIT_VERSION="0.3.1-alpine"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -182,11 +182,15 @@ else
     check_security "System Restart" "PASS" "No restart required"
 fi
 
-# Check SSH config overrides
+# Prefer sshd's fully resolved configuration. This correctly handles distro
+# defaults and Include drop-ins, which simple grep-based checks often misread.
+SSH_EFFECTIVE=$(sshd -T 2>/dev/null || true)
 SSH_CONFIG_OVERRIDES=$(grep "^Include" "$SSH_CONFIG_FILE" 2>/dev/null | awk '{print $2}')
 
 # Check SSH root login (handle both main config and overrides if they exist)
-if [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
+if [ -n "$SSH_EFFECTIVE" ]; then
+    SSH_ROOT=$(printf '%s\n' "$SSH_EFFECTIVE" | awk '$1=="permitrootlogin"{print $2;exit}')
+elif [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
     SSH_ROOT=$(grep "^PermitRootLogin" $SSH_CONFIG_OVERRIDES "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
 else
     SSH_ROOT=$(grep "^PermitRootLogin" "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
@@ -196,12 +200,16 @@ if [ -z "$SSH_ROOT" ]; then
 fi
 if [ "$SSH_ROOT" = "no" ]; then
     check_security "SSH Root Login" "PASS" "Root login is properly disabled in SSH configuration"
+elif [ "$SSH_ROOT" = "prohibit-password" ] || [ "$SSH_ROOT" = "without-password" ] || [ "$SSH_ROOT" = "forced-commands-only" ]; then
+    check_security "SSH Root Login" "PASS" "Root password login is disabled; root is limited to key-based access ($SSH_ROOT)"
 else
     check_security "SSH Root Login" "FAIL" "Root login is currently allowed - this is a security risk. Disable it in $SSH_CONFIG_FILE"
 fi
 
 # Check SSH password authentication (handle both main config and overrides if they exist)
-if [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
+if [ -n "$SSH_EFFECTIVE" ]; then
+    SSH_PASSWORD=$(printf '%s\n' "$SSH_EFFECTIVE" | awk '$1=="passwordauthentication"{print $2;exit}')
+elif [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
     SSH_PASSWORD=$(grep "^PasswordAuthentication" $SSH_CONFIG_OVERRIDES "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
 else
     SSH_PASSWORD=$(grep "^PasswordAuthentication" "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
@@ -218,7 +226,9 @@ fi
 # Check for default/unsecure SSH ports 
 UNPRIVILEGED_PORT_START=$(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null || echo 1024)
 SSH_PORT=""
-if [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
+if [ -n "$SSH_EFFECTIVE" ]; then
+    SSH_PORT=$(printf '%s\n' "$SSH_EFFECTIVE" | awk '$1=="port"{print $2;exit}')
+elif [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
     SSH_PORT=$(grep "^Port" $SSH_CONFIG_OVERRIDES "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
 else
     SSH_PORT=$(grep "^Port" "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
@@ -249,17 +259,19 @@ check_firewall_status() {
         else
             check_security "Firewall Status (firewalld)" "FAIL" "Firewalld is not active - your system is exposed to network attacks"
         fi
-    elif command -v iptables >/dev/null 2>&1; then
-        if iptables -L -n | grep -q "Chain INPUT"; then
-            check_security "Firewall Status (iptables)" "PASS" "iptables rules are active and protecting your system"
-        else
-            check_security "Firewall Status (iptables)" "FAIL" "No active iptables rules found - your system may be exposed"
-        fi
     elif command -v nft >/dev/null 2>&1; then
-        if nft list ruleset | grep -q "table"; then
+        if nft list ruleset 2>/dev/null | grep -Eq 'hook input|policy (drop|reject)'; then
             check_security "Firewall Status (nftables)" "PASS" "nftables rules are active and protecting your system"
         else
-            check_security "Firewall Status (nftables)" "FAIL" "No active nftables rules found - your system may be exposed"
+            check_security "Firewall Status (nftables)" "FAIL" "No active nftables input rules found - your system may be exposed"
+        fi
+    elif command -v iptables >/dev/null 2>&1; then
+        IPT_POLICY=$(iptables -S INPUT 2>/dev/null | awk 'NR==1{print $3}')
+        IPT_RULES=$(iptables -S INPUT 2>/dev/null | awk 'NR>1{n++} END{print n+0}')
+        if [ "$IPT_POLICY" = "DROP" ] || [ "$IPT_POLICY" = "REJECT" ] || [ "$IPT_RULES" -gt 0 ]; then
+            check_security "Firewall Status (iptables)" "PASS" "iptables INPUT policy/rules are active (policy=$IPT_POLICY, rules=$IPT_RULES)"
+        else
+            check_security "Firewall Status (iptables)" "FAIL" "iptables INPUT accepts traffic and has no filtering rules"
         fi
     else
         check_security "Firewall Status" "FAIL" "No recognized firewall tool is installed on this system"
@@ -438,12 +450,18 @@ check_fail2ban_port_alignment() {
 # Fail2ban jail port alignment check
 check_fail2ban_port_alignment
 
-# Check failed login attempts
-if [ -f "$AUTH_LOG_FILE" ]; then
+# Check failed login attempts. Prefer a bounded 24-hour journal window so a
+# months-old auth.log does not look like an attack currently in progress.
+FAILED_LOGIN_WINDOW="last 24 hours"
+if command -v journalctl >/dev/null 2>&1; then
+    FAILED_LOGINS=$(journalctl --since "24 hours ago" -u ssh -u sshd 2>/dev/null | grep -c "Failed password" || true)
+elif [ -f "$AUTH_LOG_FILE" ]; then
+    FAILED_LOGIN_WINDOW="current auth log"
     FAILED_LOGINS=$(grep -c "Failed password" "$AUTH_LOG_FILE" 2>/dev/null || echo 0)
 
 # if debian version > 10, info in journalctl
 elif [ "$OS_ID" = "alpine" ] && command -v logread >/dev/null 2>&1; then
+    FAILED_LOGIN_WINDOW="current syslog buffer"
     FAILED_LOGINS=$(logread 2>/dev/null | grep -c "Failed password" || echo 0)
 elif [ -f "/etc/debian_version" ]; then
     DEB_VERSION=$(cut -d'.' -f1 /etc/debian_version)
@@ -464,11 +482,11 @@ FAILED_LOGINS=$(echo "$FAILED_LOGINS" | tr -d '[:space:]')
 FAILED_LOGINS=$((10#$FAILED_LOGINS)) # Use arithmetic evaluation to ensure it's numeric and format correctly.
 
 if [ "$FAILED_LOGINS" -lt $LOGINS_WARN ]; then
-    check_security "Failed Logins" "PASS" "Only $FAILED_LOGINS failed login attempts detected - this is within normal range"
+    check_security "Failed Logins" "PASS" "Only $FAILED_LOGINS failed login attempts detected in $FAILED_LOGIN_WINDOW"
 elif [ "$FAILED_LOGINS" -lt $LOGINS_FAIL ]; then
-    check_security "Failed Logins" "WARN" "$FAILED_LOGINS failed login attempts detected - might indicate breach attempts"
+    check_security "Failed Logins" "WARN" "$FAILED_LOGINS failed login attempts detected in $FAILED_LOGIN_WINDOW"
 else
-    check_security "Failed Logins" "FAIL" "$FAILED_LOGINS failed login attempts detected - possible brute force attack in progress"
+    check_security "Failed Logins" "FAIL" "$FAILED_LOGINS failed login attempts detected in $FAILED_LOGIN_WINDOW - investigate source IPs"
 fi
 
 # Check system updates
@@ -483,7 +501,7 @@ fi
 if [ "$UPDATES" -eq 0 ]; then
     check_security "System Updates" "PASS" "All system packages are up to date"
 else
-    check_security "System Updates" "FAIL" "$UPDATES security updates available - system is vulnerable to known exploits"
+    check_security "System Updates" "WARN" "$UPDATES package updates available - review and apply updates"
 fi
 
 # Check running services
@@ -501,10 +519,10 @@ else
 fi
 
 # Check ports using netstat or ss
-if command -v netstat >/dev/null 2>&1; then
-    LISTENING_PORTS=$(netstat -tuln | grep LISTEN | awk '{print $4}')
-elif command -v ss >/dev/null 2>&1; then
-    LISTENING_PORTS=$(ss -tuln | grep LISTEN | awk '{print $5}')
+if command -v ss >/dev/null 2>&1; then
+    LISTENING_PORTS=$(ss -H -lntu 2>/dev/null | awk '{a=$5; if(a ~ /^(0\.0\.0\.0|\*|\[::\]|::):/) print a}')
+elif command -v netstat >/dev/null 2>&1; then
+    LISTENING_PORTS=$(netstat -tuln 2>/dev/null | awk 'NR>2{a=$4; if(a ~ /^(0\.0\.0\.0|\*|:::)/) print a}')
 else
     check_security "Port Scanning" "FAIL" "Neither 'netstat' nor 'ss' is available on this system."
     LISTENING_PORTS=""
@@ -579,10 +597,14 @@ else
 fi
 
 # Check sudo configuration
-if grep -q "^Defaults.*logfile" "$SUDOERS_FILE"; then
+if grep -q "^Defaults.*logfile" "$SUDOERS_FILE" 2>/dev/null; then
     check_security "Sudo Logging" "PASS" "Sudo commands are being logged for audit purposes"
+elif command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet systemd-journald >/dev/null 2>&1; then
+    check_security "Sudo Logging" "PASS" "sudo activity is captured by systemd-journald"
+elif [ -r /var/log/messages ] || [ -r /var/log/secure ]; then
+    check_security "Sudo Logging" "PASS" "sudo activity is captured by the system syslog"
 else
-    check_security "Sudo Logging" "FAIL" "Sudo commands are not being logged - reduces audit capability"
+    check_security "Sudo Logging" "WARN" "Could not confirm sudo logging; verify your journal or syslog configuration"
 fi
 
 # Check password policy
@@ -598,6 +620,8 @@ if [ -f "$PASSWORD_QUALITY_CONF" ]; then
     else
         check_security "Password Policy" "FAIL" "Weak password policy - minlen=$MINLEN_VALUE is below the recommended $PASSWORD_MINLEN"
     fi
+elif [ "$SSH_PASSWORD" = "no" ]; then
+    check_security "Password Policy" "PASS" "SSH password authentication is disabled, so remote access does not depend on a password policy"
 else
     check_security "Password Policy" "FAIL" "No password policy configured - system accepts weak passwords"
 fi

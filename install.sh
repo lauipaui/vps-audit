@@ -55,16 +55,20 @@ bash -n "$INSTALL_DIR/vps-audit.sh"
 
 if $REUSE_CONFIG; then
     [[ -r "$CONFIG_FILE" ]] || die "--reuse-config 需要已存在的 $CONFIG_FILE"
+fi
+if [[ -r "$CONFIG_FILE" ]]; then
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
 fi
 token="${TELEGRAM_BOT_TOKEN:-}"
 chat_id="${TELEGRAM_CHAT_ID:-}"
 if [ -z "$token" ]; then
+    [[ -r /dev/tty ]] || die "当前没有交互终端且未提供 Telegram 配置；请使用 deploy-all.sh 批量部署"
     read -r -s -p "Telegram Bot Token（输入不可见）：" token </dev/tty
     echo
 fi
 if [ -z "$chat_id" ]; then
+    [[ -r /dev/tty ]] || die "当前没有交互终端且未提供 Telegram 配置；请使用 deploy-all.sh 批量部署"
     read -r -p "Telegram Chat ID：" chat_id </dev/tty
 fi
 [[ -n "$token" && -n "$chat_id" ]] || die "Token 和 Chat ID 不能为空"
