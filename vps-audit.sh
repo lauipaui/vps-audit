@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VPS_AUDIT_VERSION="0.2.0"
+VPS_AUDIT_VERSION="0.3.0-alpine"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -46,10 +46,18 @@ PASSWORD_MINLEN=12  # PASS if pwquality minlen is >= this value
 # Report Output Configuration
 
 # Directory and File Naming
-DEFAULT_REPORT_DIR="."   # Where reports will be saved
+DEFAULT_REPORT_DIR="${VPS_AUDIT_REPORT_DIR:-.}"   # Where reports will be saved
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 REPORT_FILENAME="vps-audit-report-${TIMESTAMP}.txt"
 REPORT_FILE="${DEFAULT_REPORT_DIR}/${REPORT_FILENAME}"
+
+# Distribution compatibility
+# shellcheck disable=SC1091
+. "$OS_RELEASE_FILE"
+OS_ID="${ID:-unknown}"
+if [ "$OS_ID" = "alpine" ]; then
+    AUTH_LOG_FILE="/var/log/messages"
+fi
 
 # Ownership
 ENABLE_CHOWN=false  # Whether to chown the report (and the report dir, if created)
@@ -106,16 +114,16 @@ echo "================================" >> "$REPORT_FILE"
 print_header "System Information"
 
 # Get system information
-OS_INFO=$(grep PRETTY_NAME "$OS_RELEASE_FILE" | cut -d'"' -f2)
+OS_INFO="${PRETTY_NAME:-${NAME:-$OS_ID}}"
 KERNEL_VERSION=$(uname -r)
 HOSTNAME=$HOSTNAME
-UPTIME=$(uptime -p)
-UPTIME_SINCE=$(uptime -s)
-CPU_INFO=$(lscpu | grep "Model name" | cut -d':' -f2 | xargs)
+UPTIME=$(uptime -p 2>/dev/null || awk '{d=int($1/86400);h=int(($1%86400)/3600);m=int(($1%3600)/60);printf "up %d days, %d hours, %d minutes",d,h,m}' /proc/uptime)
+UPTIME_SINCE=$(uptime -s 2>/dev/null || echo "unknown")
+CPU_INFO=$(lscpu 2>/dev/null | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2);print $2;exit}')
 CPU_CORES=$(nproc)
 TOTAL_MEM=$(free -h | awk '/^Mem:/ {print $2}')
 TOTAL_DISK=$(df -h / | awk 'NR==2 {print $2}')
-PUBLIC_IP=$(curl -s https://api.ipify.org)
+PUBLIC_IP=$(curl -4fsS --connect-timeout 3 --max-time 8 https://api.ipify.org 2>/dev/null || curl -6fsS --connect-timeout 3 --max-time 8 https://api64.ipify.org 2>/dev/null || echo "unavailable")
 LOAD_AVERAGE=$(uptime | awk -F'load average:' '{print $2}' | xargs)
 
 # Print system information
@@ -159,8 +167,8 @@ check_security() {
 }
 
 # Check system uptime
-UPTIME=$(uptime -p)
-UPTIME_SINCE=$(uptime -s)
+UPTIME=$(uptime -p 2>/dev/null || awk '{d=int($1/86400);h=int(($1%86400)/3600);m=int(($1%3600)/60);printf "up %d days, %d hours, %d minutes",d,h,m}' /proc/uptime)
+UPTIME_SINCE=$(uptime -s 2>/dev/null || echo "unknown")
 echo -e "\nSystem Uptime Information:" >> "$REPORT_FILE"
 echo "Current uptime: $UPTIME" >> "$REPORT_FILE"
 echo "System up since: $UPTIME_SINCE" >> "$REPORT_FILE"
@@ -208,7 +216,7 @@ else
 fi
 
 # Check for default/unsecure SSH ports 
-UNPRIVILEGED_PORT_START=$(sysctl -n net.ipv4.ip_unprivileged_port_start)
+UNPRIVILEGED_PORT_START=$(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null || echo 1024)
 SSH_PORT=""
 if [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
     SSH_PORT=$(grep "^Port" $SSH_CONFIG_OVERRIDES "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
@@ -262,7 +270,13 @@ check_firewall_status() {
 check_firewall_status
 
 # Check for unattended upgrades
-if dpkg -l | grep -q "unattended-upgrades"; then
+if [ "$OS_ID" = "alpine" ]; then
+    if [ -x /etc/periodic/daily/apk-autoupdate ] || [ -x /etc/periodic/daily/apk-upgrade ]; then
+        check_security "Automatic Updates" "PASS" "An Alpine periodic APK update job is configured"
+    else
+        check_security "Automatic Updates" "WARN" "No periodic Alpine APK upgrade job detected"
+    fi
+elif dpkg -l 2>/dev/null | grep -q "unattended-upgrades"; then
     check_security "Unattended Upgrades" "PASS" "Automatic security updates are configured"
 else
     check_security "Unattended Upgrades" "FAIL" "Automatic security updates are not configured - system may miss critical updates"
@@ -272,14 +286,18 @@ fi
 IPS_INSTALLED=0
 IPS_ACTIVE=0
 
-if dpkg -l | grep -q "fail2ban"; then
+if { [ "$OS_ID" = "alpine" ] && apk info -e fail2ban >/dev/null 2>&1; } || dpkg -l fail2ban 2>/dev/null | grep -q '^ii'; then
     IPS_INSTALLED=1
-    systemctl is-active fail2ban >/dev/null 2>&1 && IPS_ACTIVE=1
+    if [ "$OS_ID" = "alpine" ]; then
+        rc-service fail2ban status >/dev/null 2>&1 && IPS_ACTIVE=1
+    else
+        systemctl is-active fail2ban >/dev/null 2>&1 && IPS_ACTIVE=1
+    fi
 fi
 
 # Check docker container running fail2ban
 if command -v docker >/dev/null 2>&1; then
-    if systemctl is-active --quiet docker; then
+    if { [ "$OS_ID" = "alpine" ] && rc-service docker status >/dev/null 2>&1; } || { [ "$OS_ID" != "alpine" ] && systemctl is-active --quiet docker; }; then
         if docker ps -a | awk '{print $2}' | grep "fail2ban" >/dev/null 2>&1; then
             IPS_INSTALLED=1
             docker ps | grep -q "fail2ban" && IPS_ACTIVE=1
@@ -289,14 +307,14 @@ if command -v docker >/dev/null 2>&1; then
     fi
 fi
 
-if dpkg -l | grep -q "crowdsec"; then
+if { [ "$OS_ID" = "alpine" ] && apk info -e crowdsec >/dev/null 2>&1; } || dpkg -l crowdsec 2>/dev/null | grep -q '^ii'; then
     IPS_INSTALLED=1
-    systemctl is-active crowdsec >/dev/null 2>&1 && IPS_ACTIVE=1
+    if [ "$OS_ID" = "alpine" ]; then rc-service crowdsec status >/dev/null 2>&1 && IPS_ACTIVE=1; else systemctl is-active crowdsec >/dev/null 2>&1 && IPS_ACTIVE=1; fi
 fi
 
 # Check docker container running crowdsec
 if command -v docker >/dev/null 2>&1; then
-    if systemctl is-active --quiet docker; then
+    if { [ "$OS_ID" = "alpine" ] && rc-service docker status >/dev/null 2>&1; } || { [ "$OS_ID" != "alpine" ] && systemctl is-active --quiet docker; }; then
         if docker ps -a | awk '{print $2}' | grep "crowdsec" >/dev/null 2>&1; then
             IPS_INSTALLED=1
             docker ps | grep -q "crowdsec" && IPS_ACTIVE=1
@@ -425,9 +443,11 @@ if [ -f "$AUTH_LOG_FILE" ]; then
     FAILED_LOGINS=$(grep -c "Failed password" "$AUTH_LOG_FILE" 2>/dev/null || echo 0)
 
 # if debian version > 10, info in journalctl
+elif [ "$OS_ID" = "alpine" ] && command -v logread >/dev/null 2>&1; then
+    FAILED_LOGINS=$(logread 2>/dev/null | grep -c "Failed password" || echo 0)
 elif [ -f "/etc/debian_version" ]; then
     DEB_VERSION=$(cut -d'.' -f1 /etc/debian_version)
-    if [ "$DEB_VERSION" -gt 10 ]; then
+    if command -v journalctl >/dev/null 2>&1 && { ! [[ "$DEB_VERSION" =~ ^[0-9]+$ ]] || [ "$DEB_VERSION" -gt 10 ]; }; then
         FAILED_LOGINS=$(journalctl -u ssh --since "24 hours ago" 2>/dev/null | grep -c "Failed password" || echo 0)
     else
         FAILED_LOGINS=0
@@ -452,7 +472,11 @@ else
 fi
 
 # Check system updates
-UPDATES=$(apt-get -s upgrade 2>/dev/null | grep -P '^\d+ upgraded' | cut -d" " -f1)
+if [ "$OS_ID" = "alpine" ]; then
+    UPDATES=$(apk version -l '<' 2>/dev/null | wc -l | tr -d ' ')
+else
+    UPDATES=$(apt-get -s upgrade 2>/dev/null | awk '/^[0-9]+ upgraded/{print $1;exit}')
+fi
 if [ -z "$UPDATES" ]; then
     UPDATES=0
 fi
@@ -463,7 +487,11 @@ else
 fi
 
 # Check running services
-SERVICES=$(systemctl list-units --type=service --state=running | grep -c "loaded active running")
+if [ "$OS_ID" = "alpine" ]; then
+    SERVICES=$(rc-status -a 2>/dev/null | awk '/\[ *started *\]/{n++} END{print n+0}')
+else
+    SERVICES=$(systemctl list-units --type=service --state=running 2>/dev/null | awk '/loaded active running/{n++} END{print n+0}')
+fi
 if [ "$SERVICES" -lt $SERVICES_WARN ]; then
     check_security "Running Services" "PASS" "Running minimal services ($SERVICES) - good for security"
 elif [ "$SERVICES" -lt $SERVICES_FAIL ]; then
@@ -533,8 +561,14 @@ fi
 
 # Check CPU usage
 CPU_CORES=$(nproc)
-CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | awk '{print int($2)}')
-CPU_IDLE=$(top -bn1 | grep "Cpu(s)" | awk '{print int($8)}')
+read -r -a cpu1 < /proc/stat
+total1=$((cpu1[1]+cpu1[2]+cpu1[3]+cpu1[4]+cpu1[5]+cpu1[6]+cpu1[7]+cpu1[8])); idle1=$((cpu1[4]+cpu1[5]))
+sleep 1
+read -r -a cpu2 < /proc/stat
+total2=$((cpu2[1]+cpu2[2]+cpu2[3]+cpu2[4]+cpu2[5]+cpu2[6]+cpu2[7]+cpu2[8])); idle2=$((cpu2[4]+cpu2[5]))
+delta_total=$((total2-total1)); delta_idle=$((idle2-idle1))
+if [ "$delta_total" -gt 0 ]; then CPU_IDLE=$((100*delta_idle/delta_total)); else CPU_IDLE=0; fi
+CPU_USAGE=$((100-CPU_IDLE))
 CPU_LOAD=$(uptime | awk -F'load average:' '{ print $2 }' | awk -F',' '{ print $1 }' | tr -d ' ')
 if [ "$CPU_USAGE" -lt $RESOURCE_WARN ]; then
     check_security "CPU Usage" "PASS" "Healthy CPU usage (${CPU_USAGE}% used - Active: ${CPU_USAGE}%, Idle: ${CPU_IDLE}%, Load: ${CPU_LOAD}, Cores: ${CPU_CORES})"
@@ -572,7 +606,7 @@ fi
 COMMON_SUID_PATHS='^/usr/bin/|^/bin/|^/sbin/|^/usr/sbin/|^/usr/lib|^/usr/libexec'
 KNOWN_SUID_BINS='ping$|sudo$|mount$|umount$|su$|passwd$|chsh$|newgrp$|gpasswd$|chfn$'
 
-SUID_FILES=$(find / -type f -perm -4000 2>/dev/null | \
+SUID_FILES=$(find / -xdev -type f -perm -4000 2>/dev/null | \
     grep -v -E "$COMMON_SUID_PATHS" | \
     grep -v -E "$KNOWN_SUID_BINS" | \
     wc -l)

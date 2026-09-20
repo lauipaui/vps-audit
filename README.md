@@ -1,202 +1,81 @@
-# VPS Security Audit Script
+# VPS Audit Plus
 
-A comprehensive Bash script for auditing the security and performance of your VPS (Virtual Private Server). This tool performs various security checks and provides a detailed report with recommendations for improvements.
+轻量 VPS 安全巡检脚本，Fork 自 [Nuver-Labs/vps-audit](https://github.com/Nuver-Labs/vps-audit)，增加 Alpine Linux、每周定时运行及 Telegram 报告上传。
 
-**[nuverlabs.com/vps-audit](https://nuverlabs.com/vps-audit?ref=github)** · a [Nuver Labs](https://nuverlabs.com?ref=github) project
+## 支持
 
-<!-- add a screenshot of the output here -->
+- Alpine Linux 3.19+
+- Debian 12/13
+- Ubuntu 22.04/24.04
+- OpenRC 与 systemd
+- UFW、firewalld、iptables、nftables
+- Fail2ban/CrowdSec、SSH、开放端口、更新、资源占用、SUID 文件检查
+- Telegram 发送完整 TXT 报告及 PASS/WARN/FAIL 摘要
+- 默认每周日 04:30 运行，报告本地保留 30 天
 
-![Sample Output](./screenshot.png)
-## Features
+脚本不是常驻服务，只在计划时间运行。Telegram Bot Token 仅保存在 VPS 的 `/etc/vps-audit/telegram.env`，权限为 `600`，不会提交到 GitHub。
 
-### Security Checks
-
-- **SSH Configuration**
-  - Root login status
-  - Password authentication
-  - Non-default port usage
-- **Firewall Status** (UFW/firewalld/iptables/nftables)
-- **Intrusion Prevention** (Fail2ban/CrowdSec) Configuration
-  - Fail2ban SSH jail port alignment (catches bans that silently do nothing)
-- **Failed Login Attempts**
-- **System Updates Status**
-- **Running Services** Analysis
-- **Open Ports** Detection
-- **Sudo Logging** Configuration
-- **Password Policy** Enforcement (via `pwquality.conf`)
-- **SUID Files** Detection
-
-### Performance Monitoring
-
-- Disk Space Usage
-- Memory Usage
-- CPU Usage
-- Active Internet Connections
-
----
-
-## Requirements
-
-- Ubuntu/Debian-based Linux system
-- **Root access** or `sudo` privileges
-- Basic packages (most are pre-installed):
-  - `ufw`
-  - `systemd`
-  - `netstat`/`ss`
-  - `grep`
-  - `awk`
-
----
-
-## Installation
-
-1. Download the script:
+## 一键安装
 
 ```bash
-wget https://raw.githubusercontent.com/Nuver-Labs/vps-audit/main/vps-audit.sh
-# or
-curl -O https://raw.githubusercontent.com/Nuver-Labs/vps-audit/main/vps-audit.sh
+curl -fsSL https://raw.githubusercontent.com/lauipaui/vps-audit/main/install.sh | sudo bash
 ```
 
-2. Make the script executable:
+安装时输入 Telegram Bot Token 和 Chat ID，并立即执行一次测试巡检。成功后会在 Telegram 收到完整报告。
+
+也可以通过环境变量进行无人值守安装：
 
 ```bash
-chmod +x vps-audit.sh
+curl -fsSL https://raw.githubusercontent.com/lauipaui/vps-audit/main/install.sh | \
+  sudo TELEGRAM_BOT_TOKEN='你的Token' TELEGRAM_CHAT_ID='你的ChatID' bash
 ```
 
----
+注意：把 Token 直接写入命令可能进入 Shell 历史，优先使用交互式安装。
 
-## Usage
-
-Run the script with `sudo` privileges:
+## 使用
 
 ```bash
-sudo ./vps-audit.sh
+# 立即巡检并上传 Telegram
+sudo /usr/local/sbin/vps-audit-run
+
+# 查看运行日志
+sudo tail -n 100 /var/log/vps-audit.log
+
+# 查看本地报告
+sudo ls -lh /var/lib/vps-audit/reports/
+
+# 仅手动运行审计，不发送 Telegram
+sudo VPS_AUDIT_REPORT_DIR=/root /usr/local/lib/vps-audit/vps-audit.sh
 ```
 
-The script will:
+## 修改运行时间
 
-1. Perform all security checks
-2. Display results in real-time with color coding:
-   - 🟢 [PASS] - Check passed successfully
-   - 🟡 [WARN] - Potential issues detected
-   - 🔴 [FAIL] - Critical issues found
-3. Generate a detailed report file: `vps-audit-report-[TIMESTAMP].txt`
+默认 Cron 表达式为 `30 4 * * 0`，即服务器本地时间每周日 04:30。
 
-## Output Format
+- Alpine：编辑 `/etc/crontabs/root`
+- Debian/Ubuntu：编辑 `/etc/cron.d/vps-audit`
 
-The script provides two types of output:
+## Telegram 配置
 
-1. Real-time console output with color coding:
+1. 在 Telegram 中通过 `@BotFather` 创建 Bot 并获取 Token。
+2. 给 Bot 发送一条消息。
+3. 获取个人或群组 Chat ID。
+4. 群组使用时，先将 Bot 加入群组并允许其发送文件。
 
+重新配置可以再次运行安装命令。配置文件不会被巡检报告读取或上传。
+
+## 卸载
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lauipaui/vps-audit/main/install.sh | sudo bash -s -- --uninstall
 ```
-[PASS] SSH Root Login - Root login is properly disabled in SSH configuration
-[WARN] SSH Port - Using default port 22 - consider changing to a non-standard port
-[FAIL] Firewall Status - UFW firewall is not active - your system is exposed
-```
 
-2. A detailed report file containing:
-   - All check results
-   - Specific recommendations for failed checks
-   - System resource usage statistics
-   - Timestamp of the audit
+卸载会移除 Cron 与运行器，但保留 Telegram 配置和历史报告，避免误删数据。
 
----
+## 性能
 
-## Customization
+它只在定时运行时短暂占用资源。主要 I/O 来自根文件系统的 SUID 扫描；已限制为 `find / -xdev`，不会递归扫描额外挂载盘、网络盘或其他文件系统。日常不常驻、不占用内存。
 
-The script's behavior, file paths, and scoring limits are fully controlled by variables defined in the **`Configuration`** section at the top of the script file.
+## 许可
 
-### 1. Dynamic Thresholds for PASS/WARN/FAIL Status
-
-These variables define the numerical limits that trigger a **WARN** or **FAIL** status.
-
-| Variable | Default Value | Check | Description |
-| :--- | :--- | :--- | :--- |
-| `RESOURCE_WARN` | `50` | Resource Usage | **WARN** if Disk/Memory/CPU usage is between 50-80%. |
-| `RESOURCE_FAIL` | `80` | Resource Usage | **FAIL** if Disk/Memory/CPU usage is more than 80%. |
-| `SERVICES_WARN` | `20` | Running Services | **WARN** if between 20-40 services are running. |
-| `SERVICES_FAIL` | `40` | Running Services | **FAIL** if more than 40 services are running. |
-| `LOGINS_WARN` | `10` | Failed Logins | **WARN** if between 10-50 failed login attempts are detected. |
-| `LOGINS_FAIL` | `50` | Failed Logins | **FAIL** if more than 50 failed login attempts are detected. |
-| `OPEN_PORTS_WARN` | `10` | Open Ports | **WARN** if between 10-20 listening ports are found. |
-| `OPEN_PORTS_FAIL` | `20` | Open Ports | **FAIL** if more than 20 listening ports are found. |
-| `PASSWORD_MINLEN` | `12` | Password Policy | **PASS** if `minlen` in `pwquality.conf` is at least this value. |
-
-### 2. Report Output and Ownership
-
-These variables control where the report is saved and the file permissions.
-
-| Variable | Default Value | Description |
-| :--- | :--- | :--- |
-| `DEFAULT_REPORT_DIR` | `.` *(The current directory)* | The directory where the report file will be saved. |
-| `ENABLE_CHOWN` | `false` | If `true`, sets ownership of the report file and (if newly created) the report directory to `REPORT_CHOWN_OWNER`. |
-| `REPORT_CHOWN_OWNER` | `${SUDO_USER:-$(id -un)}:<their group>` | The target `user:group` for `chown`. Defaults to the user who invoked `sudo`, so reports are not left owned by `root`. |
-| `REPORT_FILENAME` | `vps-audit-report-$(TIMESTAMP).txt` | The template name for the generated report file. |
-
-### 3. Security Check File Paths
-
-You can adjust the paths the script uses to check critical configuration files:
-
-| Variable | Default Value | Description |
-| :--- | :--- | :--- |
-| `OS_RELEASE_FILE` | `/etc/os-release` | Path to the Operating System release file. |
-| `REBOOT_REQUIRED_FILE` | `/var/run/reboot-required` | File indicating a system restart is needed. |
-| `SSH_CONFIG_FILE` | `/etc/ssh/sshd_config` | Main SSH daemon configuration file. |
-| `AUTH_LOG_FILE` | `/var/log/auth.log` | Log file checked for failed login attempts. |
-| `SUDOERS_FILE` | `/etc/sudoers` | File checked for sudo logging configuration. |
-| `PASSWORD_QUALITY_CONF` | `/etc/security/pwquality.conf` | Password complexity policy configuration file. |
-| `FAIL2BAN_CONFIG_DIR` | `/etc/fail2ban` | Fail2ban config directory, read to verify the SSH jail port. |
-
----
-
-## Best Practices
-
-1. Run the audit regularly (e.g., weekly) to maintain security
-2. Review the generated report thoroughly
-3. Address any **FAIL** status immediately
-4. Investigate **WARN** status during maintenance
-5. Keep the script updated with your security policies
-
-## Limitations
-
-- Designed for Debian/Ubuntu-based systems
-- Requires root/sudo access
-- Some checks may need customization for specific environments
-- Not a replacement for professional security audit
-
-## Contributing
-
-Feel free to submit issues and enhancement requests!
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
----
-
-## About
-
-vps-audit is built and maintained by [Nuver Labs](https://nuverlabs.com?ref=github).
-
-- Project page: [nuverlabs.com/vps-audit](https://nuverlabs.com/vps-audit?ref=github)
-- More from us: [github.com/nuver-labs](https://github.com/nuver-labs)
-
-## Security Notice
-
-While this script helps identify common security issues, it should not be your only security measure. Always:
-
-- Keep your system updated
-- Monitor logs regularly
-- Follow security best practices
-- Consider professional security audits for critical systems
-
-## Support
-
-For support, please:
-
-1. Check the existing issues
-2. Create a new issue with detailed information
-3. Provide the output of the script and your system information
-
-Stay secure! 🔒
+沿用上游 MIT License，并保留原项目署名。
