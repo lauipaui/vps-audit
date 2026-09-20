@@ -48,6 +48,39 @@ sudo ls -lh /var/lib/vps-audit/reports/
 sudo VPS_AUDIT_REPORT_DIR=/root /usr/local/lib/vps-audit/vps-audit.sh
 ```
 
+## 一键部署到所有 VPS
+
+前提：管理机可以使用 SSH 密钥登录各 VPS。下载批量部署器：
+
+```bash
+curl -fsSL -o deploy-all.sh \
+  https://raw.githubusercontent.com/lauipaui/vps-audit/main/deploy-all.sh
+chmod +x deploy-all.sh
+```
+
+直接传入所有 VPS：
+
+```bash
+./deploy-all.sh root@1.2.3.4 root@5.6.7.8 root@[2001:db8::10]
+```
+
+或者创建 `servers.txt`：
+
+```text
+root@1.2.3.4
+root@5.6.7.8
+root@[2001:db8::10]
+root@example.com -p 2222
+```
+
+然后一次部署：
+
+```bash
+./deploy-all.sh --hosts servers.txt
+```
+
+Telegram Token 和 Chat ID 只输入一次，通过 SSH 标准输入写入各 VPS 的 root-only 配置文件，不放进 SSH 命令参数。部署器会逐台发送测试报告，最后列出成功和失败主机。
+
 ## 修改运行时间
 
 默认 Cron 表达式为 `30 4 * * 0`，即服务器本地时间每周日 04:30。

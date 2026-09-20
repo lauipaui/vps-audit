@@ -10,6 +10,7 @@ CONFIG_FILE="$CONFIG_DIR/telegram.env"
 REPORT_DIR="/var/lib/vps-audit/reports"
 LOG_FILE="/var/log/vps-audit.log"
 SCHEDULE="30 4 * * 0"
+REUSE_CONFIG=false
 
 green(){ printf '\033[0;32m✓ %s\033[0m\n' "$*"; }
 yellow(){ printf '\033[1;33m⚠ %s\033[0m\n' "$*"; }
@@ -18,6 +19,11 @@ die(){ printf '\033[0;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 [[ ${EUID:-$(id -u)} -eq 0 ]] || die "请使用 root 或 sudo 运行"
 . /etc/os-release
 case "${ID:-}" in alpine|debian|ubuntu) ;; *) die "仅支持 Alpine、Debian、Ubuntu" ;; esac
+
+if [ "${1:-}" = "--reuse-config" ]; then
+    REUSE_CONFIG=true
+    shift
+fi
 
 if [ "${1:-}" = "--uninstall" ]; then
     if [ "${ID:-}" = "alpine" ]; then
@@ -47,6 +53,11 @@ curl -fsSL "$REPO_RAW/vps-audit.sh" -o "$INSTALL_DIR/vps-audit.sh"
 chmod 755 "$INSTALL_DIR/vps-audit.sh"
 bash -n "$INSTALL_DIR/vps-audit.sh"
 
+if $REUSE_CONFIG; then
+    [[ -r "$CONFIG_FILE" ]] || die "--reuse-config 需要已存在的 $CONFIG_FILE"
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+fi
 token="${TELEGRAM_BOT_TOKEN:-}"
 chat_id="${TELEGRAM_CHAT_ID:-}"
 if [ -z "$token" ]; then
