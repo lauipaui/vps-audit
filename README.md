@@ -97,8 +97,9 @@ Telegram Token 和 Chat ID 只输入一次，通过 SSH 标准输入写入各 VP
 
 ## 报告说明
 
-- `SSH Root Login: PASS`：`PermitRootLogin no`，或 root 仅允许密钥登录（`prohibit-password`）。
+- `SSH Root Login: PASS`：`PermitRootLogin no`，或 root 仅允许密钥登录（`prohibit-password`）；允许 root 登录但全局密码认证关闭时仍会提醒为 WARN。
 - `SSH Password Auth`：读取 `sshd -T` 的最终结果，而不是简单搜索配置文件。
+- 非默认 SSH 高端口不会被误判为“不安全”；端口号本身不是安全边界。
 - `Failed Logins`：systemd 主机统计最近 24 小时；Alpine 无 journal 时会明确标记实际日志窗口。
 - `Firewall Status`：检查 nftables input hook/policy，或 iptables INPUT 的策略与规则数量。
 - `Port Security`：只计算绑定到 `0.0.0.0`、`::` 或通配地址的监听端口。

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-VPS_AUDIT_VERSION="0.3.1-alpine"
+VPS_AUDIT_VERSION="0.3.2-alpine"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -186,6 +186,7 @@ fi
 # defaults and Include drop-ins, which simple grep-based checks often misread.
 SSH_EFFECTIVE=$(sshd -T 2>/dev/null || true)
 SSH_CONFIG_OVERRIDES=$(grep "^Include" "$SSH_CONFIG_FILE" 2>/dev/null | awk '{print $2}')
+SSH_PASSWORD=$(printf '%s\n' "$SSH_EFFECTIVE" | awk '$1=="passwordauthentication"{print $2;exit}')
 
 # Check SSH root login (handle both main config and overrides if they exist)
 if [ -n "$SSH_EFFECTIVE" ]; then
@@ -203,15 +204,17 @@ if [ "$SSH_ROOT" = "no" ]; then
 elif [ "$SSH_ROOT" = "prohibit-password" ] || [ "$SSH_ROOT" = "without-password" ] || [ "$SSH_ROOT" = "forced-commands-only" ]; then
     check_security "SSH Root Login" "PASS" "Root password login is disabled; root is limited to key-based access ($SSH_ROOT)"
 else
-    check_security "SSH Root Login" "FAIL" "Root login is currently allowed - this is a security risk. Disable it in $SSH_CONFIG_FILE"
+    if [ "$SSH_PASSWORD" = "no" ]; then
+        check_security "SSH Root Login" "WARN" "Root key login is allowed, but password authentication is disabled; disable root SSH if it is not required"
+    else
+        check_security "SSH Root Login" "FAIL" "Root login and password authentication are both allowed - disable at least root password access"
+    fi
 fi
 
 # Check SSH password authentication (handle both main config and overrides if they exist)
-if [ -n "$SSH_EFFECTIVE" ]; then
-    SSH_PASSWORD=$(printf '%s\n' "$SSH_EFFECTIVE" | awk '$1=="passwordauthentication"{print $2;exit}')
-elif [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
+if [ -z "$SSH_PASSWORD" ] && [ -n "$SSH_CONFIG_OVERRIDES" ] && [ -d "$(dirname "$SSH_CONFIG_OVERRIDES")" ]; then
     SSH_PASSWORD=$(grep "^PasswordAuthentication" $SSH_CONFIG_OVERRIDES "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
-else
+elif [ -z "$SSH_PASSWORD" ]; then
     SSH_PASSWORD=$(grep "^PasswordAuthentication" "$SSH_CONFIG_FILE" 2>/dev/null | head -1 | awk '{print $2}')
 fi
 if [ -z "$SSH_PASSWORD" ]; then
@@ -224,7 +227,6 @@ else
 fi
 
 # Check for default/unsecure SSH ports 
-UNPRIVILEGED_PORT_START=$(sysctl -n net.ipv4.ip_unprivileged_port_start 2>/dev/null || echo 1024)
 SSH_PORT=""
 if [ -n "$SSH_EFFECTIVE" ]; then
     SSH_PORT=$(printf '%s\n' "$SSH_EFFECTIVE" | awk '$1=="port"{print $2;exit}')
@@ -239,10 +241,8 @@ fi
 
 if [ "$SSH_PORT" = "22" ]; then
     check_security "SSH Port" "WARN" "Using default port 22 - consider changing to a non-standard port for security by obscurity"
-elif [ "$SSH_PORT" -ge "$UNPRIVILEGED_PORT_START" ]; then
-    check_security "SSH Port" "FAIL" "Using unprivileged port $SSH_PORT - use a port below $UNPRIVILEGED_PORT_START for better security"
 else
-    check_security "SSH Port" "PASS" "Using non-default port $SSH_PORT which helps prevent automated attacks"
+    check_security "SSH Port" "PASS" "Using non-default port $SSH_PORT; port number alone is not a security boundary"
 fi
 
 # Check Firewall Status
