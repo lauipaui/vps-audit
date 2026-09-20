@@ -10,6 +10,9 @@
 - OpenRC 与 systemd
 - UFW、firewalld、iptables、nftables
 - Fail2ban/CrowdSec、SSH、开放端口、更新、资源占用、SUID 文件检查
+- 使用 `sshd -T` 检查最终生效配置，兼容 `sshd_config.d` 覆盖项
+- SSH 失败登录默认统计最近 24 小时，不把数月累计日志误报为实时攻击
+- 识别真正生效的 nftables/iptables 入站规则及公网监听端口
 - Telegram 发送完整 TXT 报告及 PASS/WARN/FAIL 摘要
 - 默认每周日 04:30 运行，报告本地保留 30 天
 
@@ -23,14 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/lauipaui/vps-audit/main/install.sh 
 
 安装时输入 Telegram Bot Token 和 Chat ID，并立即执行一次测试巡检。成功后会在 Telegram 收到完整报告。
 
-也可以通过环境变量进行无人值守安装：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/lauipaui/vps-audit/main/install.sh | \
-  sudo TELEGRAM_BOT_TOKEN='你的Token' TELEGRAM_CHAT_ID='你的ChatID' bash
-```
-
-注意：把 Token 直接写入命令可能进入 Shell 历史，优先使用交互式安装。
+该命令需要真实交互终端。不要在 Lite Monitor、Komari 网页命令框或其他没有 `/dev/tty` 的远程执行页面中运行，否则无法安全输入 Telegram 凭据。多台 VPS 或无交互环境请使用下一节的 `deploy-all.sh`。
 
 ## 使用
 
@@ -81,6 +77,8 @@ root@example.com -p 2222
 
 Telegram Token 和 Chat ID 只输入一次，通过 SSH 标准输入写入各 VPS 的 root-only 配置文件，不放进 SSH 命令参数。部署器会逐台发送测试报告，最后列出成功和失败主机。
 
+> 不建议把 Bot Token 直接写进 Lite Monitor/Komari 命令、Shell 历史、`servers.txt` 或 GitHub 仓库。
+
 ## 修改运行时间
 
 默认 Cron 表达式为 `30 4 * * 0`，即服务器本地时间每周日 04:30。
@@ -96,6 +94,39 @@ Telegram Token 和 Chat ID 只输入一次，通过 SSH 标准输入写入各 VP
 4. 群组使用时，先将 Bot 加入群组并允许其发送文件。
 
 重新配置可以再次运行安装命令。配置文件不会被巡检报告读取或上传。
+
+## 报告说明
+
+- `SSH Root Login: PASS`：`PermitRootLogin no`，或 root 仅允许密钥登录（`prohibit-password`）。
+- `SSH Password Auth`：读取 `sshd -T` 的最终结果，而不是简单搜索配置文件。
+- `Failed Logins`：systemd 主机统计最近 24 小时；Alpine 无 journal 时会明确标记实际日志窗口。
+- `Firewall Status`：检查 nftables input hook/policy，或 iptables INPUT 的策略与规则数量。
+- `Port Security`：只计算绑定到 `0.0.0.0`、`::` 或通配地址的监听端口。
+- `System Updates`：表示存在普通软件包更新，不冒充“已确认的安全更新”。
+- `Sudo Logging`：支持独立 logfile、systemd-journald 和 syslog。
+
+报告是基线提示，不会自动修改 SSH、防火墙或软件包。
+
+## 故障排除
+
+### `/dev/tty: No such device or address`
+
+说明安装命令运行在 Lite Monitor/Komari 网页执行器、Cron 或其他非交互环境中。请在管理机使用：
+
+```bash
+./deploy-all.sh --hosts servers.txt
+```
+
+新版安装器会在无 TTY 且没有预配置凭据时明确退出，不再直接读取不存在的 `/dev/tty`。
+
+### Cron 出现 systemd-sysv-install 提示
+
+```text
+Synchronizing state of cron.service with SysV service script
+Executing: /lib/systemd/systemd-sysv-install enable cron
+```
+
+这是 Debian/Ubuntu 启用 Cron 时的正常 systemd 提示，不是报错。
 
 ## 卸载
 
