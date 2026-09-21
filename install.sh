@@ -96,20 +96,41 @@ before=$(find "$REPORT_DIR" -maxdepth 1 -type f -name 'vps-audit-report-*.txt' -
 report=$(find "$REPORT_DIR" -maxdepth 1 -type f -name 'vps-audit-report-*.txt' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
 [[ -n "$report" && "$report" != "$before" ]] || { echo "$(date -Is) report not generated" >>"$LOG_FILE"; exit 1; }
 
-pass=$(grep -c '^\[PASS\]' "$report" || true)
-warn=$(grep -c '^\[WARN\]' "$report" || true)
-fail=$(grep -c '^\[FAIL\]' "$report" || true)
-caption=$(printf 'VPS 安全巡检 | %s\nPASS: %s | WARN: %s | FAIL: %s\n%s' "$(hostname)" "$pass" "$warn" "$fail" "$(date -Is)")
-response=$(curl -fsS --retry 2 --connect-timeout 5 --max-time 60 \
-  -F "chat_id=$TELEGRAM_CHAT_ID" \
-  -F "caption=$caption" \
-  -F "document=@$report;type=text/plain" \
-  "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendDocument")
-printf '%s\n' "$response" >>"$LOG_FILE"
-printf '%s' "$response" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || {
-  echo "$(date -Is) Telegram API rejected the report" >>"$LOG_FILE"
-  exit 1
+warn=$(grep -c '^\[警告\]' "$report" || true)
+fail=$(grep -c '^\[失败\]' "$report" || true)
+
+send_message() {
+  local message="$1" response
+  response=$(curl -fsS --retry 2 --connect-timeout 5 --max-time 60 \
+    -d "chat_id=$TELEGRAM_CHAT_ID" \
+    --data-urlencode "text=$message" \
+    "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage")
+  printf '%s\n' "$response" >>"$LOG_FILE"
+  printf '%s' "$response" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || {
+    echo "$(date -Is) Telegram API 拒绝了巡检消息" >>"$LOG_FILE"
+    return 1
+  }
 }
+
+# Telegram 只接收警告和失败项；完整报告仍保存在本机。
+if [ "$warn" -gt 0 ] || [ "$fail" -gt 0 ]; then
+  header=$(printf '⚠️ VPS 安全巡检发现问题\n主机：%s\n时间：%s\n警告：%s 项｜失败：%s 项' \
+    "$(hostname)" "$(date '+%F %T %Z')" "$warn" "$fail")
+  chunk="$header"
+  while IFS= read -r line; do
+    candidate=$(printf '%s\n\n%s' "$chunk" "$line")
+    # 按 UTF-8 字节数控制长度，给 Telegram 的 4096 上限留出余量。
+    if [ "$(printf '%s' "$candidate" | wc -c)" -gt 3500 ]; then
+      send_message "$chunk"
+      chunk="$line"
+    else
+      chunk="$candidate"
+    fi
+  done < <(grep -E '^\[(警告|失败)\]' "$report" || true)
+  [ -z "$chunk" ] || send_message "$chunk"
+else
+  echo "$(date -Is) 巡检未发现警告或失败，不发送 Telegram 消息" >>"$LOG_FILE"
+fi
 find "$REPORT_DIR" -type f -name 'vps-audit-report-*.txt' -mtime "+${REPORT_RETENTION_DAYS:-30}" -delete
 exit "${audit_rc:-0}"
 RUNNER
@@ -127,10 +148,16 @@ EOF
     chmod 644 /etc/cron.d/vps-audit
 fi
 
-green "已安装：每周日 04:30 自动巡检并上传 Telegram"
-echo "正在发送测试报告……"
+green "已安装：每周日 04:30 自动巡检，仅将警告和失败项以中文文本发送到 Telegram"
+echo "正在验证 Telegram 配置……"
+telegram_check=$(curl -fsS --retry 2 --connect-timeout 5 --max-time 30 \
+  -d "chat_id=$chat_id" \
+  "https://api.telegram.org/bot$token/getChat") || die "Telegram 连接失败，请检查网络、Token 和 Chat ID"
+printf '%s' "$telegram_check" | grep -q '"ok"[[:space:]]*:[[:space:]]*true' || die "Telegram 配置验证失败，请检查 Token、Chat ID 以及 Bot 的群组权限"
+green "Telegram 配置验证成功"
+echo "正在执行首次巡检……"
 if "$RUNNER"; then
-    green "Telegram 测试报告已发送"
+    green "首次巡检完成；仅在存在警告或失败项时发送 Telegram 消息"
 else
     die "测试失败，请检查 $LOG_FILE"
 fi

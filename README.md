@@ -1,6 +1,6 @@
 # VPS Audit Plus
 
-轻量 VPS 安全巡检脚本，Fork 自 [Nuver-Labs/vps-audit](https://github.com/Nuver-Labs/vps-audit)，增加 Alpine Linux、每周定时运行及 Telegram 报告上传。
+轻量 VPS 安全巡检脚本，Fork 自 [Nuver-Labs/vps-audit](https://github.com/Nuver-Labs/vps-audit)，增加 Alpine Linux、每周定时运行及 Telegram 中文告警。
 
 ## 支持
 
@@ -13,7 +13,8 @@
 - 使用 `sshd -T` 检查最终生效配置，兼容 `sshd_config.d` 覆盖项
 - SSH 失败登录默认统计最近 24 小时，不把数月累计日志误报为实时攻击
 - 识别真正生效的 nftables/iptables 入站规则及公网监听端口
-- Telegram 发送完整 TXT 报告及 PASS/WARN/FAIL 摘要
+- Telegram 仅发送中文的警告和失败项，内容过长时自动分段
+- 不向 Telegram 上传报告文件，完整报告只保存在 VPS 本机
 - 默认每周日 04:30 运行，报告本地保留 30 天
 
 脚本不是常驻服务，只在计划时间运行。Telegram Bot Token 仅保存在 VPS 的 `/etc/vps-audit/telegram.env`，权限为 `600`，不会提交到 GitHub。
@@ -24,14 +25,28 @@
 curl -fsSL https://raw.githubusercontent.com/lauipaui/vps-audit/main/install.sh | sudo bash
 ```
 
-安装时输入 Telegram Bot Token 和 Chat ID，并立即执行一次测试巡检。成功后会在 Telegram 收到完整报告。
+安装时输入 Telegram Bot Token 和 Chat ID，安装器会验证配置并立即执行一次巡检。只有发现警告或失败项时，Telegram 才会收到中文文本消息。
 
 该命令需要真实交互终端。不要在 Lite Monitor、Komari 网页命令框或其他没有 `/dev/tty` 的远程执行页面中运行，否则无法安全输入 Telegram 凭据。多台 VPS 或无交互环境请使用下一节的 `deploy-all.sh`。
+
+## 从仓库一键更新
+
+已安装过的 VPS 可直接重新运行安装器。它会从仓库下载最新版并自动复用现有 Telegram 配置：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/lauipaui/vps-audit/main/install.sh | sudo bash
+```
+
+多台 VPS 请在管理机更新 `deploy-all.sh` 后重新批量部署：
+
+```bash
+curl -fsSL -o deploy-all.sh https://raw.githubusercontent.com/lauipaui/vps-audit/main/deploy-all.sh && chmod +x deploy-all.sh && ./deploy-all.sh --hosts servers.txt
+```
 
 ## 使用
 
 ```bash
-# 立即巡检并上传 Telegram
+# 立即巡检；仅将警告和失败项发送到 Telegram
 sudo /usr/local/sbin/vps-audit-run
 
 # 查看运行日志
@@ -75,7 +90,7 @@ root@example.com -p 2222
 ./deploy-all.sh --hosts servers.txt
 ```
 
-Telegram Token 和 Chat ID 只输入一次，通过 SSH 标准输入写入各 VPS 的 root-only 配置文件，不放进 SSH 命令参数。部署器会逐台发送测试报告，最后列出成功和失败主机。
+Telegram Token 和 Chat ID 只输入一次，通过 SSH 标准输入写入各 VPS 的 root-only 配置文件，不放进 SSH 命令参数。部署器会逐台验证配置并执行首次巡检，最后列出成功和失败主机。
 
 > 不建议把 Bot Token 直接写进 Lite Monitor/Komari 命令、Shell 历史、`servers.txt` 或 GitHub 仓库。
 
@@ -91,22 +106,22 @@ Telegram Token 和 Chat ID 只输入一次，通过 SSH 标准输入写入各 VP
 1. 在 Telegram 中通过 `@BotFather` 创建 Bot 并获取 Token。
 2. 给 Bot 发送一条消息。
 3. 获取个人或群组 Chat ID。
-4. 群组使用时，先将 Bot 加入群组并允许其发送文件。
+4. 群组使用时，先将 Bot 加入群组并允许其发送消息。
 
 重新配置可以再次运行安装命令。配置文件不会被巡检报告读取或上传。
 
 ## 报告说明
 
-- `SSH Root Login: PASS`：`PermitRootLogin no`，或 root 仅允许密钥登录（`prohibit-password`）；允许 root 登录但全局密码认证关闭时仍会提醒为 WARN。
-- `SSH Password Auth`：读取 `sshd -T` 的最终结果，而不是简单搜索配置文件。
+- `SSH Root 登录`：`PermitRootLogin no`，或 root 仅允许密钥登录（`prohibit-password`）；允许 root 登录但全局密码认证关闭时仍会标记为警告。
+- `SSH 密码认证`：读取 `sshd -T` 的最终结果，而不是简单搜索配置文件。
 - 非默认 SSH 高端口不会被误判为“不安全”；端口号本身不是安全边界。
-- `Failed Logins`：systemd 主机统计最近 24 小时；Alpine 无 journal 时会明确标记实际日志窗口。
-- `Firewall Status`：检查 nftables input hook/policy，或 iptables INPUT 的策略与规则数量。
-- `Port Security`：只计算绑定到 `0.0.0.0`、`::` 或通配地址的监听端口。
-- `System Updates`：表示存在普通软件包更新，不冒充“已确认的安全更新”。
-- `Sudo Logging`：支持独立 logfile、systemd-journald 和 syslog。
+- `失败登录`：systemd 主机统计最近 24 小时；Alpine 无 journal 时会明确标记实际日志窗口。
+- `防火墙状态`：检查 nftables input hook/policy，或 iptables INPUT 的策略与规则数量。
+- `端口安全`：只计算绑定到 `0.0.0.0`、`::` 或通配地址的监听端口。
+- `系统更新`：表示存在普通软件包更新，不冒充“已确认的安全更新”。
+- `Sudo 日志`：支持独立 logfile、systemd-journald 和 syslog。
 
-报告是基线提示，不会自动修改 SSH、防火墙或软件包。
+本地报告包含全部通过、警告和失败项目；Telegram 只接收中文警告和失败文本，不接收文件。报告是基线提示，不会自动修改 SSH、防火墙或软件包。
 
 ## 故障排除
 
