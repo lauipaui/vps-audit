@@ -1,5 +1,7 @@
 # VPS Audit Plus
 
+**中文** | [English](README.en.md)
+
 轻量 VPS 安全巡检脚本，Fork 自 [Nuver-Labs/vps-audit](https://github.com/Nuver-Labs/vps-audit)，增加 Alpine Linux、每周定时运行及 Telegram 中文告警。
 
 ## 支持
@@ -159,3 +161,32 @@ curl -fsSL https://raw.githubusercontent.com/lauipaui/vps-audit/main/install.sh 
 ## 许可
 
 沿用上游 MIT License，并保留原项目署名。
+
+
+## 仓库结构、离线检查与变更边界
+
+| 文件 | 用途 |
+| --- | --- |
+| [`vps-audit.sh`](vps-audit.sh) | 只读为主的巡检并生成本地报告 |
+| [`install.sh`](install.sh) | 安装依赖、生成运行器、配置凭据和 Cron；与巡检不同，会修改系统 |
+| [`deploy-all.sh`](deploy-all.sh) | 管理机经 SSH 批量部署 |
+| [`LICENSE`](LICENSE) | 上游 MIT 许可 |
+
+```sh
+bash -n install.sh
+bash -n deploy-all.sh
+bash -n vps-audit.sh
+```
+
+这些只是语法检查，不运行 SUID 扫描、安装依赖、连接 VPS 或发送 Telegram。本仓库没有统一的自动化验收套件。本次只改文档，未批量部署或重新验收通知。
+
+### 更新、凭据与回滚细节
+
+- 推荐先克隆并审阅再执行 `sudo bash install.sh`；安装器仍从本 Fork 的 `main` 下载 `vps-audit.sh`，本地安装器快照不等于固定了所有下载内容。
+- `sudo bash install.sh --reuse-config` 要求现有 `/etc/vps-audit/telegram.env` 可读；它是复用配置选项，不是无修改的检查模式。普通重装也会复用已有有效值。
+- 该配置以 shell 文件读取，只用可信、root-only 文件；Token 不进仓库并不意味着进程/网络诊断记录不可能包含它，分享日志前仍需脱敏。
+- `deploy-all.sh` 使用密钥认证和 `StrictHostKeyChecking=accept-new`；首连前独立核对主机身份，批量部署不是 SSH 密钥分发器。`servers.txt` 也包含主机清单，不提交真实列表。
+- 更新前自己备份 `/usr/local/lib/vps-audit/vps-audit.sh`、`/usr/local/sbin/vps-audit-run`、Cron 与凭据/报告。当前安装器没有完整的自动回滚或版本锁定机制。
+- 回归时暂停本项目 Cron，恢复已知正常的脚本/运行器和对应 Cron，再用虚拟或受保护配置验证。卸载仅移除 Cron 和运行器，**不等于清除巡检脚本、凭据、历史报告和所有日志**，也不会撤销安装的系统依赖。
+
+报告可能含来源 IP、开放端口、账户、文件路径和网络信息，向外分享应先脱敏。巡检提示不是渗透测试、实时入侵检测或系统安全保证；部分检查需要 root 和相应工具才能得到完整结果。
